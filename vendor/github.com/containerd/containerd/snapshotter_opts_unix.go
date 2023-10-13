@@ -26,12 +26,13 @@ import (
 )
 
 const (
-	capabRemapIDs = "remap-ids"
+	capaRemapIDs     = "remap-ids"
+	capaOnlyRemapIds = "only-remap-ids"
 )
 
 // WithRemapperLabels creates the labels used by any supporting snapshotter
 // to shift the filesystem ownership (user namespace mapping) automatically; currently
-// supported by the fuse-overlayfs snapshotter
+// supported by the fuse-overlayfs and overlay snapshotters
 func WithRemapperLabels(ctrUID, hostUID, ctrGID, hostGID, length uint32) snapshots.Opt {
 	return snapshots.WithLabels(map[string]string{
 		snapshots.LabelSnapshotUIDMapping: fmt.Sprintf("%d:%d:%d", ctrUID, hostUID, length),
@@ -45,7 +46,7 @@ func resolveSnapshotOptions(ctx context.Context, client *Client, snapshotterName
 	}
 
 	for _, capab := range capabs {
-		if capab == capabRemapIDs {
+		if capab == capaRemapIDs {
 			// Snapshotter supports ID remapping, we don't need to do anything.
 			return parent, nil
 		}
@@ -70,6 +71,17 @@ func resolveSnapshotOptions(ctx context.Context, client *Client, snapshotterName
 
 	if !needsRemap {
 		return parent, nil
+	}
+
+	capaOnlyRemap := false
+	for _, capa := range capabs {
+		if capa == capaOnlyRemapIds {
+			capaOnlyRemap = true
+		}
+	}
+
+	if capaOnlyRemap {
+		return "", fmt.Errorf("snapshotter %q doesn't support idmap mounts on this host, configure `slow_chown` to allow a slower and expensive fallback", snapshotterName)
 	}
 
 	var ctrUID, hostUID, length uint32

@@ -24,14 +24,16 @@ ROOTDIR=$(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 # The files will be installed under `$(DESTDIR)/$(PREFIX)`.
 # The convention of `DESTDIR` was changed in containerd v1.6.
 PREFIX        ?= /usr/local
+BINDIR        ?= $(PREFIX)/bin
 DATADIR       ?= $(PREFIX)/share
+DOCDIR        ?= $(DATADIR)/doc
 MANDIR        ?= $(DATADIR)/man
 
 TEST_IMAGE_LIST ?=
 
 # Used to populate variables in version package.
 VERSION ?= $(shell git describe --match 'v[0-9]*' --dirty='.m' --always)
-REVISION=$(shell git rev-parse HEAD)$(shell if ! git diff --no-ext-diff --quiet --exit-code; then echo .m; fi)
+REVISION ?= $(shell git rev-parse HEAD)$(shell if ! git diff --no-ext-diff --quiet --exit-code; then echo .m; fi)
 PACKAGE=github.com/containerd/containerd
 SHIM_CGO_ENABLED ?= 0
 
@@ -124,10 +126,10 @@ ifdef SKIPTESTS
 endif
 
 #Replaces ":" (*nix), ";" (windows) with newline for easy parsing
-GOPATHS=$(shell go env GOPATH | tr ":" "\n" | tr ";" "\n")
+GOPATHS=$(shell $(GO) env GOPATH | tr ":" "\n" | tr ";" "\n")
 
 TESTFLAGS_RACE=
-GO_BUILD_FLAGS=
+GO_BUILD_FLAGS ?=
 # See Golang issue re: '-trimpath': https://github.com/golang/go/issues/13809
 GO_GCFLAGS=$(shell				\
 	set -- ${GOPATHS};			\
@@ -149,7 +151,7 @@ GOTEST ?= $(GO) test
 OUTPUTDIR = $(join $(ROOTDIR), _output)
 CRIDIR=$(OUTPUTDIR)/cri
 
-.PHONY: clean all AUTHORS build binaries test integration generate protos check-protos coverage ci check help install uninstall vendor release static-release mandir install-man genman install-cri-deps cri-release cri-cni-release cri-integration install-deps bin/cri-integration.test
+.PHONY: clean all AUTHORS build binaries test integration generate protos check-protos coverage ci check help install uninstall vendor release static-release mandir install-man install-doc genman install-cri-deps cri-release cri-cni-release cri-integration install-deps bin/cri-integration.test
 .DEFAULT: default
 
 # Forcibly set the default goal to all, in case an include above brought in a rule definition.
@@ -234,6 +236,11 @@ bin/cni-bridge-fp: integration/failpoint/cmd/cni-bridge-fp FORCE
 	@echo "$(WHALE) $@"
 	@$(GO) build ${GO_BUILD_FLAGS} -o $@ ./integration/failpoint/cmd/cni-bridge-fp
 
+# build runc-fp as runc wrapper to support failpoint, only used by integration test
+bin/runc-fp: integration/failpoint/cmd/runc-fp FORCE
+	@echo "$(WHALE) $@"
+	@$(GO) build ${GO_BUILD_FLAGS} -o $@ ./integration/failpoint/cmd/runc-fp
+
 benchmark: ## run benchmarks tests
 	@echo "$(WHALE) $@"
 	@$(GO) test ${TESTFLAGS} -bench . -run Benchmark -test.root
@@ -253,14 +260,6 @@ bin/%: cmd/% FORCE
 bin/gen-manpages: cmd/gen-manpages FORCE
 	@echo "$(WHALE) $@"
 	$(GO) build ${DEBUG_GO_GCFLAGS} ${GO_GCFLAGS} ${GO_BUILD_FLAGS} -o $@ ${GO_LDFLAGS} $(subst urfave_cli_no_docs,,${GO_TAGS})  ./cmd/gen-manpages
-
-bin/containerd-shim: cmd/containerd-shim FORCE # set !cgo and omit pie for a static shim build: https://github.com/golang/go/issues/17789#issuecomment-258542220
-	@echo "$(WHALE) $@"
-	@CGO_ENABLED=${SHIM_CGO_ENABLED} $(GO) build ${GO_BUILD_FLAGS} -o $@ ${SHIM_GO_LDFLAGS} ${GO_TAGS} ./cmd/containerd-shim
-
-bin/containerd-shim-runc-v1: cmd/containerd-shim-runc-v1 FORCE # set !cgo and omit pie for a static shim build: https://github.com/golang/go/issues/17789#issuecomment-258542220
-	@echo "$(WHALE) $@"
-	@CGO_ENABLED=${SHIM_CGO_ENABLED} $(GO) build ${GO_BUILD_FLAGS} -o $@ ${SHIM_GO_LDFLAGS} ${GO_TAGS} ./cmd/containerd-shim-runc-v1
 
 bin/containerd-shim-runc-v2: cmd/containerd-shim-runc-v2 FORCE # set !cgo and omit pie for a static shim build: https://github.com/golang/go/issues/17789#issuecomment-258542220
 	@echo "$(WHALE) $@"
@@ -299,6 +298,10 @@ install-man: man
 	@echo "$(WHALE) $@"
 	$(foreach manpage,$(addprefix man/,$(MANPAGES)), $(call installmanpage,$(manpage),$(subst .,,$(suffix $(manpage))),$(notdir $(manpage))))
 
+install-doc:
+	@echo "$(WHALE) $@"
+	@mkdir -p $(DESTDIR)/$(DOCDIR)/containerd
+	@cp -R docs/* $(DESTDIR)/$(DOCDIR)/containerd
 
 define pack_release
 	@rm -rf releases/$(1) releases/$(1).tar.gz
@@ -382,11 +385,11 @@ releases/$(CRICNIRELEASE).tar.gz: install-cri-deps $(CRIDIR)/cri-containerd.DEPR
 	@tar -czf releases/$(CRICNIRELEASE).tar.gz -C $(CRIDIR) cri-containerd.DEPRECATED.txt etc usr opt
 endif
 
-cri-release: releases/$(CRIRELEASE).tar.gz
+cri-release: releases/$(CRIRELEASE).tar.gz ## Deprecated (only kept for external CI)
 	@echo "$(WHALE) $@"
 	@cd releases && sha256sum $(CRIRELEASE).tar.gz >$(CRIRELEASE).tar.gz.sha256sum && ln -sf $(CRIRELEASE).tar.gz cri-containerd.tar.gz
 
-cri-cni-release: releases/$(CRICNIRELEASE).tar.gz
+cri-cni-release: releases/$(CRICNIRELEASE).tar.gz ## Deprecated (only kept for external CI)
 	@echo "$(WHALE) $@"
 	@cd releases && sha256sum $(CRICNIRELEASE).tar.gz >$(CRICNIRELEASE).tar.gz.sha256sum && ln -sf $(CRICNIRELEASE).tar.gz cri-cni-containerd.tar.gz
 
@@ -400,7 +403,7 @@ clean: ## clean up binaries
 clean-test: ## clean up debris from previously failed tests
 	@echo "$(WHALE) $@"
 	$(eval containers=$(shell find /run/containerd/runc -mindepth 2 -maxdepth 3  -type d -exec basename {} \;))
-	$(shell pidof containerd containerd-shim runc | xargs -r -n 1 kill -9)
+	$(shell pidof containerd runc | xargs -r -n 1 kill -9)
 	@( for container in $(containers); do \
 	    grep $$container /proc/self/mountinfo | while read -r mountpoint; do \
 		umount $$(echo $$mountpoint | awk '{print $$5}'); \
@@ -416,16 +419,15 @@ clean-test: ## clean up debris from previously failed tests
 
 install: ## install binaries
 	@echo "$(WHALE) $@ $(BINARIES)"
-	@$(INSTALL) -d $(DESTDIR)$(PREFIX)/bin
-	@$(INSTALL) $(BINARIES) $(DESTDIR)$(PREFIX)/bin
+	@$(INSTALL) -d $(DESTDIR)$(BINDIR)
+	@$(INSTALL) $(BINARIES) $(DESTDIR)$(BINDIR)
 
 uninstall:
 	@echo "$(WHALE) $@"
-	@rm -f $(addprefix $(DESTDIR)$(PREFIX)/bin/,$(notdir $(BINARIES)))
+	@rm -f $(addprefix $(DESTDIR)$(BINDIR)/,$(notdir $(BINARIES)))
 
 ifeq ($(GOOS),windows)
 install-deps:
-	# TODO: need a script for hcshim something like containerd/cri/hack/install/windows/install-hcsshim.sh
 	script/setup/install-critools
 	script/setup/install-cni-windows
 else

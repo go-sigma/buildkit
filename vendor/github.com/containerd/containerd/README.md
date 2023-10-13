@@ -47,7 +47,7 @@ See our documentation on [containerd.io](https://containerd.io):
 * [namespaces](docs/namespaces.md)
 * [client options](docs/client-opts.md)
 
-See how to build containerd from source at [BUILDING](BUILDING.md).
+To get started contributing to containerd, see [CONTRIBUTING](CONTRIBUTING.md).
 
 If you are interested in trying out containerd see our example at [Getting Started](docs/getting-started.md).
 
@@ -57,6 +57,13 @@ There are nightly builds available for download [here](https://github.com/contai
 Binaries are generated from `main` branch every night for `Linux` and `Windows`.
 
 Please be aware: nightly builds might have critical bugs, it's not recommended for use in production and no support provided.
+
+## Kubernetes (k8s) CI Dashboard Group
+
+The [k8s CI dashboard group for containerd](https://testgrid.k8s.io/containerd) contains test results regarding
+the health of kubernetes when run against main and a number of containerd release branches.
+
+- [containerd-periodics](https://testgrid.k8s.io/containerd-periodic)
 
 ## Runtime Requirements
 

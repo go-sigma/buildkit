@@ -25,9 +25,9 @@ import (
 	api "github.com/containerd/containerd/api/services/content/v1"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/protobuf"
 	ptypes "github.com/containerd/containerd/protobuf/types"
+	"github.com/containerd/log"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"google.golang.org/grpc"
@@ -40,12 +40,15 @@ type service struct {
 	api.UnimplementedContentServer
 }
 
-var bufPool = sync.Pool{
-	New: func() interface{} {
-		buffer := make([]byte, 1<<20)
-		return &buffer
-	},
-}
+var (
+	empty   = &ptypes.Empty{}
+	bufPool = sync.Pool{
+		New: func() interface{} {
+			buffer := make([]byte, 1<<20)
+			return &buffer
+		},
+	}
+)
 
 // New returns the content GRPC server
 func New(cs content.Store) api.ContentServer {
@@ -101,12 +104,7 @@ func (s *service) List(req *api.ListContentRequest, session api.Content_ListServ
 	)
 
 	if err := s.store.Walk(session.Context(), func(info content.Info) error {
-		buffer = append(buffer, &api.Info{
-			Digest:    info.Digest.String(),
-			Size:      info.Size,
-			CreatedAt: protobuf.ToTimestamp(info.CreatedAt),
-			Labels:    info.Labels,
-		})
+		buffer = append(buffer, infoToGRPC(info))
 
 		if len(buffer) >= 100 {
 			if err := sendBlock(buffer); err != nil {
@@ -142,7 +140,7 @@ func (s *service) Delete(ctx context.Context, req *api.DeleteContentRequest) (*p
 		return nil, errdefs.ToGRPC(err)
 	}
 
-	return &ptypes.Empty{}, nil
+	return empty, nil
 }
 
 func (s *service) Read(req *api.ReadContentRequest, session api.Content_ReadServer) error {
@@ -449,7 +447,7 @@ func (s *service) Abort(ctx context.Context, req *api.AbortRequest) (*ptypes.Emp
 		return nil, errdefs.ToGRPC(err)
 	}
 
-	return &ptypes.Empty{}, nil
+	return empty, nil
 }
 
 func infoToGRPC(info content.Info) *api.Info {

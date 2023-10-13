@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/container-orchestrated-devices/container-device-interface/pkg/cdi"
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
@@ -35,8 +36,9 @@ import (
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/continuity/fs"
+	"github.com/containerd/log"
+	"github.com/moby/sys/user"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/opencontainers/runc/libcontainer/user"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
@@ -183,13 +185,6 @@ func WithEnv(environmentVariables []string) SpecOpts {
 		}
 		return nil
 	}
-}
-
-// WithDefaultPathEnv sets the $PATH environment variable to the
-// default PATH defined in this package.
-func WithDefaultPathEnv(_ context.Context, _ Client, _ *containers.Container, s *Spec) error {
-	s.Process.Env = replaceOrAppendEnvValues(s.Process.Env, defaultUnixEnv)
-	return nil
 }
 
 // replaceOrAppendEnvValues returns the defaults with the overrides either
@@ -374,26 +369,24 @@ func WithImageConfigArgs(image Image, args []string) SpecOpts {
 		if err != nil {
 			return err
 		}
+		if !images.IsConfigType(ic.MediaType) {
+			return fmt.Errorf("unknown image config media type %s", ic.MediaType)
+		}
+
 		var (
 			imageConfigBytes []byte
 			ociimage         v1.Image
 			config           v1.ImageConfig
 		)
-		switch ic.MediaType {
-		case v1.MediaTypeImageConfig, images.MediaTypeDockerSchema2Config:
-			var err error
-			imageConfigBytes, err = content.ReadBlob(ctx, image.ContentStore(), ic)
-			if err != nil {
-				return err
-			}
-
-			if err := json.Unmarshal(imageConfigBytes, &ociimage); err != nil {
-				return err
-			}
-			config = ociimage.Config
-		default:
-			return fmt.Errorf("unknown image config media type %s", ic.MediaType)
+		imageConfigBytes, err = content.ReadBlob(ctx, image.ContentStore(), ic)
+		if err != nil {
+			return err
 		}
+
+		if err = json.Unmarshal(imageConfigBytes, &ociimage); err != nil {
+			return err
+		}
+		config = ociimage.Config
 
 		appendOSMounts(s, ociimage.OS)
 		setProcess(s)
@@ -418,7 +411,7 @@ func WithImageConfigArgs(image Image, args []string) SpecOpts {
 				if err := WithUser(config.User)(ctx, client, c, s); err != nil {
 					return err
 				}
-				return WithAdditionalGIDs(fmt.Sprintf("%d", s.Process.User.UID))(ctx, client, c, s)
+				return WithAdditionalGIDs(strconv.FormatInt(int64(s.Process.User.UID), 10))(ctx, client, c, s)
 			}
 			// we should query the image's /etc/group for additional GIDs
 			// even if there is no specified user in the image config
@@ -464,6 +457,7 @@ func WithImageConfigArgs(image Image, args []string) SpecOpts {
 				return errors.New("no arguments specified")
 			}
 
+			//nolint:staticcheck // ArgsEscaped is deprecated
 			if config.ArgsEscaped && (len(config.Entrypoint) > 0 || cmdFromImage) {
 				s.Process.Args = nil
 				s.Process.CommandLine = cmd[0]
@@ -958,6 +952,11 @@ func WithCapabilities(caps []string) SpecOpts {
 		s.Process.Capabilities.Bounding = caps
 		s.Process.Capabilities.Effective = caps
 		s.Process.Capabilities.Permitted = caps
+		if len(caps) == 0 {
+			s.Process.Capabilities.Inheritable = nil
+		} else if len(s.Process.Capabilities.Inheritable) > 0 {
+			filterCaps(&s.Process.Capabilities.Inheritable, caps)
+		}
 
 		return nil
 	}
@@ -979,6 +978,16 @@ func removeCap(caps *[]string, s string) {
 			continue
 		}
 		newcaps = append(newcaps, c)
+	}
+	*caps = newcaps
+}
+
+func filterCaps(caps *[]string, filters []string) {
+	var newcaps []string
+	for _, c := range *caps {
+		if capsContain(filters, c) {
+			newcaps = append(newcaps, c)
+		}
 	}
 	*caps = newcaps
 }
@@ -1011,6 +1020,7 @@ func WithDroppedCapabilities(caps []string) SpecOpts {
 				&s.Process.Capabilities.Bounding,
 				&s.Process.Capabilities.Effective,
 				&s.Process.Capabilities.Permitted,
+				&s.Process.Capabilities.Inheritable,
 			} {
 				removeCap(cl, c)
 			}
@@ -1525,6 +1535,15 @@ func WithCPUCFS(quota int64, period uint64) SpecOpts {
 	}
 }
 
+// WithCPUBurst sets the container's cpu burst
+func WithCPUBurst(burst uint64) SpecOpts {
+	return func(ctx context.Context, _ Client, c *containers.Container, s *Spec) error {
+		setCPU(s)
+		s.Linux.Resources.CPU.Burst = &burst
+		return nil
+	}
+}
+
 // WithCPURT sets the container's realtime scheduling (RT) runtime and period.
 func WithCPURT(runtime int64, period uint64) SpecOpts {
 	return func(ctx context.Context, _ Client, c *containers.Container, s *Spec) error {
@@ -1618,6 +1637,35 @@ func WithWindowsNetworkNamespace(ns string) SpecOpts {
 			s.Windows.Network = &specs.WindowsNetwork{}
 		}
 		s.Windows.Network.NetworkNamespace = ns
+		return nil
+	}
+}
+
+// WithCDIDevices injects the requested CDI devices into the OCI specification.
+func WithCDIDevices(devices ...string) SpecOpts {
+	return func(ctx context.Context, _ Client, c *containers.Container, s *Spec) error {
+		if len(devices) == 0 {
+			return nil
+		}
+
+		registry := cdi.GetRegistry()
+		if err := registry.Refresh(); err != nil {
+			// We don't consider registry refresh failure a fatal error.
+			// For instance, a dynamically generated invalid CDI Spec file for
+			// any particular vendor shouldn't prevent injection of devices of
+			// different vendors. CDI itself knows better and it will fail the
+			// injection if necessary.
+			log.G(ctx).Warnf("CDI registry refresh failed: %v", err)
+		}
+
+		if _, err := registry.InjectDevices(s, devices...); err != nil {
+			return fmt.Errorf("CDI device injection failed: %w", err)
+		}
+
+		// One crucial thing to keep in mind is that CDI device injection
+		// might add OCI Spec environment variables, hooks, and mounts as
+		// well. Therefore it is important that none of the corresponding
+		// OCI Spec fields are reset up in the call stack once we return.
 		return nil
 	}
 }

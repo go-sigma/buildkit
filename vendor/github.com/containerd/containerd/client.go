@@ -21,7 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,7 +51,7 @@ import (
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/pkg/dialer"
 	"github.com/containerd/containerd/platforms"
-	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/plugins"
 	ptypes "github.com/containerd/containerd/protobuf/types"
 	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/remotes/docker"
@@ -185,7 +184,7 @@ func NewWithConn(conn *grpc.ClientConn, opts ...ClientOpt) (*Client, error) {
 	c := &Client{
 		defaultns: copts.defaultns,
 		conn:      conn,
-		runtime:   fmt.Sprintf("%s.%s", plugin.RuntimePlugin, runtime.GOOS),
+		runtime:   defaults.DefaultRuntime,
 	}
 
 	if copts.defaultPlatform != nil {
@@ -403,13 +402,9 @@ func (c *Client) Fetch(ctx context.Context, ref string, opts ...RemoteOpt) (imag
 		if len(fetchCtx.Platforms) == 0 {
 			fetchCtx.PlatformMatcher = platforms.All
 		} else {
-			var ps []ocispec.Platform
-			for _, s := range fetchCtx.Platforms {
-				p, err := platforms.Parse(s)
-				if err != nil {
-					return images.Image{}, fmt.Errorf("invalid platform %s: %w", s, err)
-				}
-				ps = append(ps, p)
+			ps, err := platforms.ParseAll(fetchCtx.Platforms)
+			if err != nil {
+				return images.Image{}, err
 			}
 
 			fetchCtx.PlatformMatcher = platforms.Any(ps...)
@@ -439,13 +434,9 @@ func (c *Client) Push(ctx context.Context, ref string, desc ocispec.Descriptor, 
 	}
 	if pushCtx.PlatformMatcher == nil {
 		if len(pushCtx.Platforms) > 0 {
-			var ps []ocispec.Platform
-			for _, platform := range pushCtx.Platforms {
-				p, err := platforms.Parse(platform)
-				if err != nil {
-					return fmt.Errorf("invalid platform %s: %w", platform, err)
-				}
-				ps = append(ps, p)
+			ps, err := platforms.ParseAll(pushCtx.Platforms)
+			if err != nil {
+				return err
 			}
 			pushCtx.PlatformMatcher = platforms.Any(ps...)
 		} else {
@@ -544,6 +535,19 @@ func writeIndex(ctx context.Context, index *ocispec.Index, client *Client, ref s
 		return ocispec.Descriptor{}, err
 	}
 	return writeContent(ctx, client.ContentStore(), ocispec.MediaTypeImageIndex, ref, bytes.NewReader(data), content.WithLabels(labels))
+}
+
+func decodeIndex(ctx context.Context, store content.Provider, desc ocispec.Descriptor) (*ocispec.Index, error) {
+	var index ocispec.Index
+	p, err := content.ReadBlob(ctx, store, desc)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(p, &index); err != nil {
+		return nil, err
+	}
+
+	return &index, nil
 }
 
 // GetLabel gets a label value from namespace store
@@ -818,27 +822,10 @@ func (c *Client) getSnapshotter(ctx context.Context, name string) (snapshots.Sna
 	return s, nil
 }
 
-// CheckRuntime returns true if the current runtime matches the expected
-// runtime. Providing various parts of the runtime schema will match those
-// parts of the expected runtime
-func CheckRuntime(current, expected string) bool {
-	cp := strings.Split(current, ".")
-	l := len(cp)
-	for i, p := range strings.Split(expected, ".") {
-		if i > l {
-			return false
-		}
-		if p != cp[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // GetSnapshotterSupportedPlatforms returns a platform matchers which represents the
 // supported platforms for the given snapshotters
 func (c *Client) GetSnapshotterSupportedPlatforms(ctx context.Context, snapshotterName string) (platforms.MatchComparer, error) {
-	filters := []string{fmt.Sprintf("type==%s, id==%s", plugin.SnapshotPlugin, snapshotterName)}
+	filters := []string{fmt.Sprintf("type==%s, id==%s", plugins.SnapshotPlugin, snapshotterName)}
 	in := c.IntrospectionService()
 
 	resp, err := in.Plugins(ctx, filters)
@@ -869,7 +856,7 @@ func toPlatforms(pt []*apitypes.Platform) []ocispec.Platform {
 
 // GetSnapshotterCapabilities returns the capabilities of a snapshotter.
 func (c *Client) GetSnapshotterCapabilities(ctx context.Context, snapshotterName string) ([]string, error) {
-	filters := []string{fmt.Sprintf("type==%s, id==%s", plugin.SnapshotPlugin, snapshotterName)}
+	filters := []string{fmt.Sprintf("type==%s, id==%s", plugins.SnapshotPlugin, snapshotterName)}
 	in := c.IntrospectionService()
 
 	resp, err := in.Plugins(ctx, filters)

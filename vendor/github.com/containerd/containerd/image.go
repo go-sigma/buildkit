@@ -21,13 +21,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
-	"sync/atomic"
+	"sync"
 
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/diff"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/images/usage"
 	"github.com/containerd/containerd/labels"
 	"github.com/containerd/containerd/pkg/kmutex"
 	"github.com/containerd/containerd/platforms"
@@ -36,7 +36,6 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"golang.org/x/sync/semaphore"
 )
 
 // Image describes an image used by containers
@@ -57,7 +56,7 @@ type Image interface {
 	Usage(context.Context, ...UsageOpt) (int64, error)
 	// Config descriptor for the image.
 	Config(ctx context.Context) (ocispec.Descriptor, error)
-	// IsUnpacked returns whether or not an image is unpacked.
+	// IsUnpacked returns whether an image is unpacked.
 	IsUnpacked(context.Context, string) (bool, error)
 	// ContentStore provides a content store which contains image blob data
 	ContentStore() content.Store
@@ -137,6 +136,9 @@ type image struct {
 
 	i        images.Image
 	platform platforms.MatchComparer
+	diffIDs  []digest.Digest
+
+	mu sync.Mutex
 }
 
 func (i *image) Metadata() images.Image {
@@ -156,12 +158,23 @@ func (i *image) Labels() map[string]string {
 }
 
 func (i *image) RootFS(ctx context.Context) ([]digest.Digest, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.diffIDs != nil {
+		return i.diffIDs, nil
+	}
+
 	provider := i.client.ContentStore()
-	return i.i.RootFS(ctx, provider, i.platform)
+	diffIDs, err := i.i.RootFS(ctx, provider, i.platform)
+	if err != nil {
+		return nil, err
+	}
+	i.diffIDs = diffIDs
+	return diffIDs, nil
 }
 
 func (i *image) Size(ctx context.Context) (int64, error) {
-	return i.Usage(ctx, WithUsageManifestLimit(1), WithManifestUsage())
+	return usage.CalculateImageUsage(ctx, i.i, i.client.ContentStore(), usage.WithManifestLimit(i.platform, 1), usage.WithManifestUsage())
 }
 
 func (i *image) Usage(ctx context.Context, opts ...UsageOpt) (int64, error) {
@@ -172,86 +185,18 @@ func (i *image) Usage(ctx context.Context, opts ...UsageOpt) (int64, error) {
 		}
 	}
 
-	var (
-		provider  = i.client.ContentStore()
-		handler   = images.ChildrenHandler(provider)
-		size      int64
-		mustExist bool
-	)
-
+	var usageOpts []usage.Opt
 	if config.manifestLimit != nil {
-		handler = images.LimitManifests(handler, i.platform, *config.manifestLimit)
-		mustExist = true
+		usageOpts = append(usageOpts, usage.WithManifestLimit(i.platform, *config.manifestLimit))
+	}
+	if config.snapshots {
+		usageOpts = append(usageOpts, usage.WithSnapshotters(i.client.SnapshotService))
+	}
+	if config.manifestOnly {
+		usageOpts = append(usageOpts, usage.WithManifestUsage())
 	}
 
-	var wh images.HandlerFunc = func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
-		var usage int64
-		children, err := handler(ctx, desc)
-		if err != nil {
-			if !errdefs.IsNotFound(err) || mustExist {
-				return nil, err
-			}
-			if !config.manifestOnly {
-				// Do not count size of non-existent objects
-				desc.Size = 0
-			}
-		} else if config.snapshots || !config.manifestOnly {
-			info, err := provider.Info(ctx, desc.Digest)
-			if err != nil {
-				if !errdefs.IsNotFound(err) {
-					return nil, err
-				}
-				if !config.manifestOnly {
-					// Do not count size of non-existent objects
-					desc.Size = 0
-				}
-			} else if info.Size > desc.Size {
-				// Count actual usage, Size may be unset or -1
-				desc.Size = info.Size
-			}
-
-			if config.snapshots {
-				for k, v := range info.Labels {
-					const prefix = "containerd.io/gc.ref.snapshot."
-					if !strings.HasPrefix(k, prefix) {
-						continue
-					}
-
-					sn := i.client.SnapshotService(k[len(prefix):])
-					if sn == nil {
-						continue
-					}
-
-					u, err := sn.Usage(ctx, v)
-					if err != nil {
-						if !errdefs.IsNotFound(err) && !errdefs.IsInvalidArgument(err) {
-							return nil, err
-						}
-					} else {
-						usage += u.Size
-					}
-				}
-			}
-		}
-
-		// Ignore unknown sizes. Generally unknown sizes should
-		// never be set in manifests, however, the usage
-		// calculation does not need to enforce this.
-		if desc.Size >= 0 {
-			usage += desc.Size
-		}
-
-		atomic.AddInt64(&size, usage)
-
-		return children, nil
-	}
-
-	l := semaphore.NewWeighted(3)
-	if err := images.Dispatch(ctx, wh, l, i.i.Target); err != nil {
-		return 0, err
-	}
-
-	return size, nil
+	return usage.CalculateImageUsage(ctx, i.i, i.client.ContentStore(), usageOpts...)
 }
 
 func (i *image) Config(ctx context.Context) (ocispec.Descriptor, error) {
@@ -264,22 +209,20 @@ func (i *image) IsUnpacked(ctx context.Context, snapshotterName string) (bool, e
 	if err != nil {
 		return false, err
 	}
-	cs := i.client.ContentStore()
 
-	diffs, err := i.i.RootFS(ctx, cs, i.platform)
+	diffs, err := i.RootFS(ctx)
 	if err != nil {
 		return false, err
 	}
 
-	chainID := identity.ChainID(diffs)
-	_, err = sn.Stat(ctx, chainID.String())
-	if err == nil {
-		return true, nil
-	} else if !errdefs.IsNotFound(err) {
+	if _, err := sn.Stat(ctx, identity.ChainID(diffs).String()); err != nil {
+		if errdefs.IsNotFound(err) {
+			return false, nil
+		}
 		return false, err
 	}
 
-	return false, nil
+	return true, nil
 }
 
 func (i *image) Spec(ctx context.Context) (ocispec.Image, error) {
@@ -355,7 +298,7 @@ func (i *image) Unpack(ctx context.Context, snapshotterName string, opts ...Unpa
 		return err
 	}
 
-	layers, err := i.getLayers(ctx, i.platform, manifest)
+	layers, err := i.getLayers(ctx, manifest)
 	if err != nil {
 		return err
 	}
@@ -409,12 +352,12 @@ func (i *image) Unpack(ctx context.Context, snapshotterName string, opts ...Unpa
 		return err
 	}
 
-	rootfs := identity.ChainID(chain).String()
+	rootFS := identity.ChainID(chain).String()
 
 	cinfo := content.Info{
 		Digest: desc.Digest,
 		Labels: map[string]string{
-			fmt.Sprintf("containerd.io/gc.ref.snapshot.%s", snapshotterName): rootfs,
+			fmt.Sprintf("containerd.io/gc.ref.snapshot.%s", snapshotterName): rootFS,
 		},
 	}
 
@@ -431,13 +374,20 @@ func (i *image) getManifest(ctx context.Context, platform platforms.MatchCompare
 	return manifest, nil
 }
 
-func (i *image) getLayers(ctx context.Context, platform platforms.MatchComparer, manifest ocispec.Manifest) ([]rootfs.Layer, error) {
-	cs := i.ContentStore()
-	diffIDs, err := i.i.RootFS(ctx, cs, platform)
+func (i *image) getLayers(ctx context.Context, manifest ocispec.Manifest) ([]rootfs.Layer, error) {
+	diffIDs, err := i.RootFS(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve rootfs: %w", err)
 	}
-	if len(diffIDs) != len(manifest.Layers) {
+
+	// parse out the image layers from oci artifact layers
+	imageLayers := []ocispec.Descriptor{}
+	for _, ociLayer := range manifest.Layers {
+		if images.IsLayerType(ociLayer.MediaType) {
+			imageLayers = append(imageLayers, ociLayer)
+		}
+	}
+	if len(diffIDs) != len(imageLayers) {
 		return nil, errors.New("mismatched image rootfs and manifest layers")
 	}
 	layers := make([]rootfs.Layer, len(diffIDs))
@@ -447,23 +397,9 @@ func (i *image) getLayers(ctx context.Context, platform platforms.MatchComparer,
 			MediaType: ocispec.MediaTypeImageLayer,
 			Digest:    diffIDs[i],
 		}
-		layers[i].Blob = manifest.Layers[i]
+		layers[i].Blob = imageLayers[i]
 	}
 	return layers, nil
-}
-
-func (i *image) getManifestPlatform(ctx context.Context, manifest ocispec.Manifest) (ocispec.Platform, error) {
-	cs := i.ContentStore()
-	p, err := content.ReadBlob(ctx, cs, manifest.Config)
-	if err != nil {
-		return ocispec.Platform{}, err
-	}
-
-	var image ocispec.Image
-	if err := json.Unmarshal(p, &image); err != nil {
-		return ocispec.Platform{}, err
-	}
-	return platforms.Normalize(ocispec.Platform{OS: image.OS, Architecture: image.Architecture}), nil
 }
 
 func (i *image) checkSnapshotterSupport(ctx context.Context, snapshotterName string, manifest ocispec.Manifest) error {
@@ -472,7 +408,7 @@ func (i *image) checkSnapshotterSupport(ctx context.Context, snapshotterName str
 		return err
 	}
 
-	manifestPlatform, err := i.getManifestPlatform(ctx, manifest)
+	manifestPlatform, err := images.ConfigPlatform(ctx, i.ContentStore(), manifest.Config)
 	if err != nil {
 		return err
 	}
