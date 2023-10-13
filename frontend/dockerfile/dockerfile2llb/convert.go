@@ -1307,7 +1307,7 @@ func dispatchHealthcheck(d *dispatchState, c *instructions.HealthCheckCommand) e
 		Interval:      c.Health.Interval,
 		Timeout:       c.Health.Timeout,
 		StartPeriod:   c.Health.StartPeriod,
-		StartInterval: c.Health.StartInterval,
+		StartInterval: c.Health.StartPeriod,
 		Retries:       c.Health.Retries,
 	}
 	return commitToHistory(&d.image, fmt.Sprintf("HEALTHCHECK %q", d.image.Config.Healthcheck), false, nil, d.epoch)

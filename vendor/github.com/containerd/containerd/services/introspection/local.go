@@ -28,6 +28,8 @@ import (
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/filters"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/plugin/registry"
+	"github.com/containerd/containerd/plugins"
 	ptypes "github.com/containerd/containerd/protobuf/types"
 	"github.com/containerd/containerd/services"
 	"github.com/google/uuid"
@@ -38,15 +40,15 @@ import (
 )
 
 func init() {
-	plugin.Register(&plugin.Registration{
-		Type:     plugin.ServicePlugin,
+	registry.Register(&plugin.Registration{
+		Type:     plugins.ServicePlugin,
 		ID:       services.IntrospectionService,
 		Requires: []plugin.Type{},
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
 			// this service fetches all plugins through the plugin set of the plugin context
 			return &Local{
 				plugins: ic.Plugins(),
-				root:    ic.Root,
+				root:    ic.Properties[plugins.PropertyRootDir],
 			}, nil
 		},
 	})
@@ -189,15 +191,6 @@ func adaptPlugin(o interface{}) filters.Adaptor {
 func pluginsToPB(plugins []*plugin.Plugin) []*api.Plugin {
 	var pluginsPB []*api.Plugin
 	for _, p := range plugins {
-		var platforms []*types.Platform
-		for _, p := range p.Meta.Platforms {
-			platforms = append(platforms, &types.Platform{
-				OS:           p.OS,
-				Architecture: p.Architecture,
-				Variant:      p.Variant,
-			})
-		}
-
 		var requires []string
 		for _, r := range p.Registration.Requires {
 			requires = append(requires, r.String())
@@ -231,7 +224,7 @@ func pluginsToPB(plugins []*plugin.Plugin) []*api.Plugin {
 			Type:         p.Registration.Type.String(),
 			ID:           p.Registration.ID,
 			Requires:     requires,
-			Platforms:    platforms,
+			Platforms:    types.OCIPlatformToProto(p.Meta.Platforms),
 			Capabilities: p.Meta.Capabilities,
 			Exports:      p.Meta.Exports,
 			InitErr:      initErr,

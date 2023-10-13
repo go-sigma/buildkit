@@ -589,7 +589,7 @@ func parseHealthcheck(req parseRequest) (*HealthCheckCommand, error) {
 		if err != nil {
 			return nil, err
 		}
-		healthcheck.StartInterval = startInterval
+		healthcheck.StartPeriod = startInterval
 
 		if flRetries.Value != "" {
 			retries, err := strconv.ParseInt(flRetries.Value, 10, 32)

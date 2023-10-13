@@ -28,7 +28,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/klauspost/compress/zstd"
 	exec "golang.org/x/sys/execabs"
 )
@@ -146,7 +146,7 @@ func magicNumberMatcher(m []byte) matcher {
 
 // zstdMatcher detects zstd compression algorithm.
 // There are two frame formats defined by Zstandard: Zstandard frames and Skippable frames.
-// See https://tools.ietf.org/id/draft-kucherawy-dispatch-zstd-00.html#rfc.section.2 for more details.
+// See https://datatracker.ietf.org/doc/html/rfc8878#section-3 for more details.
 func zstdMatcher() matcher {
 	return func(source []byte) bool {
 		if bytes.HasPrefix(source, zstdMagic) {

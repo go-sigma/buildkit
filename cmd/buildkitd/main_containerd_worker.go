@@ -15,7 +15,7 @@ import (
 	"github.com/containerd/containerd/defaults"
 	runtimeoptions "github.com/containerd/containerd/pkg/runtimeoptions/v1"
 	"github.com/containerd/containerd/pkg/userns"
-	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/plugins"
 	runcoptions "github.com/containerd/containerd/runtime/v2/runc/options"
 	"github.com/moby/buildkit/cmd/buildkitd/config"
 	"github.com/moby/buildkit/util/bklog"
@@ -370,7 +370,7 @@ func validContainerdSocket(cfg config.ContainerdConfig) bool {
 // getRuntimeOptionsType gets empty runtime options by the runtime type name.
 func getRuntimeOptionsType(t string) interface{} {
 	switch t {
-	case plugin.RuntimeRuncV2:
+	case plugins.RuntimeRuncV2:
 		return &runcoptions.Options{}
 	default:
 		return &runtimeoptions.Options{}
