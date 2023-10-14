@@ -22,8 +22,8 @@ cross:
 .PHONY: images
 images:
 # moby/buildkit:local and moby/buildkit:local-rootless are created on Docker
-	hack/images local moby/buildkit
-	TARGET=rootless hack/images local moby/buildkit
+	# hack/images local moby/buildkit
+	TARGET=rootless hack/images local tosone/buildkit
 
 .PHONY: install
 install:

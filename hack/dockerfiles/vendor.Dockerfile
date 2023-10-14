@@ -4,7 +4,7 @@ ARG GO_VERSION=1.20
 ARG MODOUTDATED_VERSION=v0.9.0
 
 FROM golang:${GO_VERSION}-alpine AS base
-RUN apk add --no-cache git rsync
+RUN sed -i "s/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g" /etc/apk/repositories && apk add --no-cache git rsync
 WORKDIR /src
 
 FROM base AS vendored

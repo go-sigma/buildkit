@@ -95,7 +95,7 @@ ARG TARGETPLATFORM
 RUN --mount=target=. --mount=target=/root/.cache,type=cache \
   --mount=target=/go/pkg/mod,type=cache \
   --mount=source=/tmp/.ldflags,target=/tmp/.ldflags,from=buildkit-version \
-  xx-go build -ldflags "$(cat /tmp/.ldflags)" -o /usr/bin/buildctl ./cmd/buildctl && \
+  xx-go build -tags=nydus -ldflags "$(cat /tmp/.ldflags)" -o /usr/bin/buildctl ./cmd/buildctl && \
   xx-verify --static /usr/bin/buildctl
 
 # build buildkitd binary
@@ -334,6 +334,7 @@ RUN adduser -D -u 1000 user \
   && echo user:100000:65536 | tee /etc/subuid | tee /etc/subgid
 COPY --link --from=rootlesskit /rootlesskit /usr/bin/
 COPY --link --from=binaries / /usr/bin/
+COPY --link --from=nydus /out/nydus-static/* /usr/bin/
 COPY --link examples/buildctl-daemonless/buildctl-daemonless.sh /usr/bin/
 # Kubernetes runAsNonRoot requires USER to be numeric
 USER 1000:1000
